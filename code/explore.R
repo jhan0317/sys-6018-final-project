@@ -512,3 +512,222 @@ agg2=agg2[order(-(agg2$positive)),]
 
 # Plot positive sentiments with overall rating
 plot(agg2$positive, agg2$overallRate)
+
+                           
+####################################################
+# Predict GPA based on survey of course evaluation #
+####################################################
+                           
+# Read in data from collected surveys                           
+survey = fread("survey.csv")
+survey = survey[,-c(1, 10)]
+names(survey) = c('comments','clarityRate', 'easyRate', 'helpfulRate', 'overallRate', 'quality', 'interest', 'teacherTags')
+
+# Check if there is any missing value
+sum(is.na(survey))   # No missing value
+# 0
+
+# Turn clarityRate, easyRate, helpfulRate and quality into numeric variables
+cols = c("clarityRate", "easyRate","helpfulRate", "quality")
+dict = setNames(c(1,2,3,4,5),c("Awful","Poor","Average","Good","Awesome"))
+# Iterate through these and use the dictionary to set their values
+for (col in cols) {
+  temp = survey[,col,with=FALSE]
+  temp[] = dict[unlist(temp)]
+  survey[[col]] = temp[[1]]
+}
+
+# Calculate clarityColor, easyColor, helpColor
+# If "Rate" equals to 4 or 5, then "Color" = 3
+# If "Rate" equals to 3, then "Color" = 2
+#"Rate" equals to 1, then "Color" = 1
+survey$clarityColor = ifelse(survey$clarityRate>3, 3, 2)
+survey$clarityColor[survey$clarityRate == 1] = 1
+survey$easyColor = ifelse(survey$easyRate>3, 3, 2)
+survey$easyColor[survey$easyRate == 1] = 1
+survey$helpColor = ifelse(survey$helpfulRate>3, 3, 2)
+survey$helpColor[survey$helpfulRate == 1] = 1
+
+# Not sure what is helpCount, nothelpCount and status, just set them to the median of training data
+survey$helpCount = median(final_dummy$helpCount)
+survey$nothelpCount = median(final_dummy$nothelpCount)
+survey$status = median(final_dummy$status)
+
+survey$textBookUse = TRUE
+
+dict = setNames(c(1,2,3,4,5),c("Low","Meh","Sorta Interested","Really into it","It's my life"))
+temp = survey[,"interest",with=FALSE]
+temp[] = dict[unlist(temp)]
+survey$interest_val = survey$interest
+survey$interest = NULL
+survey[["interest_val"]] = temp[[1]]
+
+survey$averageScore = mean(survey$overallRate)
+survey$numOfRating = 17    #  17 17
+
+# get all the tags and turn them into dummy varaibles
+survey$teacherTags = unlist(lapply(survey$teacherTags, function(x) gsub("\\[|\\]|'","",x)))
+survey$teacherTags = lapply(survey$teacherTags, function(x) as.list(strsplit(x,", ")[[1]]))
+dummy = mtabulate(survey$teacherTags)  # 17, 16
+survey$teacherTags = NULL
+survey_final = cbind(survey, dummy)  # 17 32
+colnames(survey_final)[30] ="\"\"Skip class? You wont pass.\"\""
+
+# Text
+# Do some preliminary text analysis and cleaning
+train.clean = survey$comments
+# Trim whitespace
+train.clean = trimws(train.clean)
+# Convert ascii characters (will remove most)
+train.clean = iconv(train.clean, to='ASCII', sub='')
+# Count the number of total characters
+char.1 = nchar(train.clean)
+# Remove stopwords
+train.clean = removeWords(train.clean, stopwords("english"))
+# Remove extra spaces
+train.clean = str_squish(train.clean)
+# Count the number of 'relevant' characters, removed stopwords and whitespace
+char.2 = nchar(train.clean)
+# Count the number of digits
+num = nchar(gsub("[^0-9]+", "", train.clean))
+# Remove numbers
+train.clean = gsub("[0-9]+","",train.clean)
+# Count the number of upper case words
+upper = ldply(str_match_all(train.clean,"[A-Z]"),length)[,1]
+# Change all to lower case
+train.clean = tolower(train.clean)
+# Count the number of punctuation marks
+punct = str_count(train.clean,"[:punct:]")
+# Remove punctuation marks
+train.clean = removePunctuation(train.clean)
+# Stem words
+train.clean = stemDocument(train.clean)
+
+# Here are some more variables extracted from the text, bind them to the final
+# dataframe
+text_info = data.frame(char_1 = char.1,
+                       char_2 = char.2,
+                       char_prop = char.2/(char.1+1),
+                       num = num,
+                       num_prop = num/(char.1+1),
+                       upper = upper,
+                       upper_prop = upper/(char.1+1),
+                       punct = punct,
+                       punct_prop = punct/(char.1+1))
+
+survey_final = cbind(survey_final, text_info)  # 17 41
+
+# Sentiment analysis
+# Now we see the sentiment of the text
+survey_comments = survey_final$comments
+survey_final$comments = NULL
+
+senti_train = get_nrc_sentiment(as.character(survey_comments))
+senti_train_prop = senti_train/rowSums(senti_train)
+
+# https://stackoverflow.com/questions/18142117/how-to-replace-nan-value-with-zero-in-a-huge-data-frame/18143097
+is.nan.data.frame <- function(x)
+  do.call(cbind, lapply(x, is.nan))
+
+senti_train_prop[is.nan(senti_train_prop)] = 0
+
+# Bind to final
+survey_final = cbind(survey_final, senti_train_prop)
+
+# tfidf
+survey_text = train.clean
+
+# Create a word tokenizer
+it_survey = itoken(survey_text, tolower, tokenizer=word_tokenizer,ids=sequence(nrow(survey)))
+# Apply to the survey data
+dtm_survey = create_dtm(it_survey, vectorizer)
+# Create a framework for TF-IDF
+tfidf = TfIdf$new()
+# Fit survey data to this TF-IDF framework
+dtm_survey_tfidf = fit_transform(dtm_survey, tfidf)
+# Make to matrix
+dim(dtm_survey_tfidf) = c(length(survey_text),length(dtm_survey_tfidf)/length(survey_text))
+# Set names of column
+colnames(dtm_survey_tfidf) = pruned_vocab$term
+
+# Keywords
+# tail(sort(colSums(dtm_survey_tfidf)),10)
+
+# Output
+# write.csv(as.matrix(dtm_survey_tfidf), "survey_tfidf.csv", row.names = FALSE)
+
+# Bind
+survey_final = cbind(survey_final, as.matrix(dtm_survey_tfidf))
+dim(survey_final)  #  17 450
+
+survey_final$deptSYS = 1  
+survey_final$nameMatthewGerber = 1  
+survey_final$nums = 6018 # 17 453
+
+# Add the new variables from survey to the training set
+trainNew = train
+testNew = test
+trainNew$nameMatthewGerber = 0 
+testNew$nameMatthewGerber = 0
+dim(trainNew) # 4095 1405
+dim(testNew)  # 1365 1405
+write.csv(trainNew, "train_new.csv", row.names=FALSE)
+write.csv(testNew, "test_new.csv", row.names=FALSE)
+
+# Combine with the original data
+# If there is missing value in survey data (Ex:dummy variables of professor names), fill in with 0
+all = rbind(trainNew, survey_final, fill=TRUE)  # 4112 1405
+all[is.na(all)] = 0
+survey_cleaned = all[4096:4112,] #  17 1405
+
+write.csv(survey_cleaned, "survey_cleaned.csv", row.names=FALSE)
+
+##############
+# Prediction #
+##############
+# Read in data
+survey_cleaned = fread("survey_cleaned.csv")  # 17 1405
+trainNew = fread("train_new.csv")
+testNew = fread("test_new.csv")
+
+allNew = rbind(trainNew, testNew)
+X = allNew
+X$`Course GPA` = NULL
+X = data.matrix(X)
+Y = data.matrix(allNew$`Course GPA`)
+dim(X) # 5460 1404
+dim(Y) # 5460    1
+
+# Alpha == 1 indicates LASSO.
+par(mfrow=c(1,2))
+glm_model = cv.glmnet(x=as(X, "dgCMatrix"),y=Y,alpha=0)
+plot(glm_model)
+min(glm_model$cvm)     # 0.01579014
+lam = glm_model$lambda.min
+
+glm_model_2 = cv.glmnet(x=as(X, "dgCMatrix"),y=Y,alpha=1)
+plot(glm_model_2)
+min(glm_model_2$cvm)   # 0.01470104
+lam2 = glm_model_2$lambda.min
+
+# Test on survey data
+X.test = survey_cleaned
+X.test$`Course GPA` = NULL
+X.test = data.matrix(X.test, rownames.force=FALSE)
+
+# Predict
+pred = predict(glm_model, newx=X.test, s=lam)
+pred2 = predict(glm_model_2, newx=X.test, s=lam2)
+mean(pred)  # 3.51096
+mean(pred2) # 3.569815
+
+hist(pred, main="GPA predicted from Ridge regression", xlab="GPA")
+hist(pred2, main="GPA predicted from Lasso regression", xlab="GPA")
+
+##########
+# Output #
+##########
+survey = fread("survey.csv")
+survey$ridge = pred
+survey$lasso = pred2
+write.csv(survey, "survey_predictions.csv", row.names = FALSE)
